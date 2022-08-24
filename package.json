@@ -1,0 +1,8 @@
+{
+    "name": "serverless",
+    "version": "0.1",
+    "dependencies": {
+        "aws-sdk": "^2.799.0"
+    }
+}
+

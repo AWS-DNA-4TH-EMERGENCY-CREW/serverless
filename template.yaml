@@ -1,0 +1,222 @@
+# This is the SAM template that represents the architecture of your serverless application
+# https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/serverless-sam-template-basics.html
+
+# The AWSTemplateFormatVersion identifies the capabilities of the template
+# https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/format-version-structure.html
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  serverless
+
+# Transform section specifies one or more macros that AWS CloudFormation uses to process your template
+# https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/transform-section-structure.html
+Transform:
+- AWS::Serverless-2016-10-31
+
+Globals:
+  Function:
+    Environment:
+      Variables:
+        IVS_BUCKET_NAME: !Ref IvsBucket
+        IVS_RECORD_CONF_ARN: !Ref IvsRecordConf
+        LIVE_STOP_SQS_URL: !Ref LiveStopQueue
+# Resources declares the AWS resources that you want to include in the stack
+# https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/resources-section-structure.html
+Resources:
+  serverlessApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: dev
+      Auth:
+        ApiKeyRequired: true
+      Cors:
+        AllowMethods: "'GET,POST,OPTIONS'"
+        AllowHeaders: "'content-type'"
+        AllowOrigin: "'*'"
+  createChannelFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handlers/create-channel.handler
+      Runtime: nodejs16.x
+      Architectures:
+        - x86_64
+      MemorySize: 128
+      Timeout: 5
+      Description: A lambda to add a channel to a DynamoDB table.
+      Policies:
+        # Give Create/Read/Update/Delete Permissions to the ChannelTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ChannelTable
+        - AmazonS3FullAccess
+        - Statement:
+            - Effect: Allow
+              Action:
+                - ivs:*
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - servicequotas:ListServiceQuotas
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - iam:CreateServiceLinkedRole
+                - iam:AttachRolePolicy
+                - iam:PutRolePolicy
+              Resource: 'arn:aws:iam::*:role/aws-service-role/ivs.amazonaws.com/AWSServiceRoleForIVSRecordToS3*'
+      Environment:
+        Variables:
+          # Make table name accessible as environment variable from function code during execution
+          CHANNEL_TABLE: !Ref ChannelTable
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref serverlessApi
+            Path: /channel
+            Method: POST
+
+  stopChannelFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handlers/stop-channel.handler
+      Runtime: nodejs16.x
+      Architectures:
+        - x86_64
+      MemorySize: 128
+      Timeout: 5
+      Description: A lambda to stop stream and delete channel. update end info to dynamodb and publish channel deleted events to SQS
+      Policies:
+        # Give Create/Read/Update/Delete Permissions to the ChannelTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ChannelTable
+        - AmazonSQSFullAccess
+        - AmazonS3FullAccess
+        - Statement:
+            - Effect: Allow
+              Action:
+                - ivs:*
+              Resource: '*'
+      Environment:
+        Variables:
+          # Make table name accessible as environment variable from function code during execution
+          CHANNEL_TABLE: !Ref ChannelTable
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref serverlessApi
+            Path: /channels/{channelName}/stop
+            Method: POST
+
+  getChannelFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handlers/get-channel.handler
+      Runtime: nodejs16.x
+      Architectures:
+        - x86_64
+      MemorySize: 128
+      Timeout: 10
+      Description: A lambda to get channel from a DynamoDB table
+      Policies:
+        # Give Create/Read/Update/Delete Permissions to the ChannelTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ChannelTable
+      Environment:
+        Variables:
+          # Make table name accessible as environment variable from function code during execution
+          CHANNEL_TABLE: !Ref ChannelTable
+      Events:
+        getChannelApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref serverlessApi
+            Path: /channels/{channelName}
+            Method: GET
+        getChannelsApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref serverlessApi
+            Path: /channels
+            Method: GET
+
+  ChannelTable:
+    Type: AWS::Serverless::SimpleTable
+    Properties:
+      TableName: channel
+      PrimaryKey:
+        Name: channel_name
+        Type: String
+      ProvisionedThroughput:
+        ReadCapacityUnits: 2
+        WriteCapacityUnits: 2
+
+  IvsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: "ivs-test-bucket"
+
+  IvsRecordConf:
+    Type: AWS::IVS::RecordingConfiguration
+    DependsOn: IvsBucket
+    Properties:
+      DestinationConfiguration:
+        S3:
+          BucketName: !Ref IvsBucket
+      Name: "ivs-recording-configuration"
+      ThumbnailConfiguration:
+        RecordingMode: 'INTERVAL'
+        TargetIntervalSeconds: 60
+
+  LiveStopQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: "live_stop"
+      MessageRetentionPeriod: 60
+      VisibilityTimeout: 70
+
+  ApiKey:
+    Type: 'AWS::ApiGateway::ApiKey'
+    DependsOn:
+      - serverlessApi
+    Properties:
+      Name: serverlessApiKey
+      Description: Serverless API Key V1
+      Enabled: true
+      StageKeys:
+        - RestApiId: !Ref serverlessApi
+          StageName: dev
+
+  UsagePlan:
+    Type: 'AWS::ApiGateway::UsagePlan'
+    DependsOn:
+      - serverlessApi
+    Properties:
+      ApiStages:
+        - ApiId: !Ref serverlessApi
+          Stage: dev
+      Description: serverlessApi usage plan
+      Quota:
+        Limit: 5000
+        Period: MONTH
+      Throttle:
+        BurstLimit: 10
+        RateLimit: 10
+      UsagePlanName: Plan_serverlessApi
+
+  ApiUsagePlanKey:
+    Type: "AWS::ApiGateway::UsagePlanKey"
+    DependsOn:
+      - serverlessApi
+    Properties:
+      KeyId: !Ref ApiKey
+      KeyType: API_KEY
+      UsagePlanId: !Ref UsagePlan
+
+
+Outputs:
+  WebEndpoint:
+    Description: "API Gateway endpoint URL for dev"
+    Value: !Sub "https://${serverlessApi}.execute-api.${AWS::Region}.amazonaws.com/dev/"
+  ApiKey:
+    Description: "API Key"
+    Value: !Ref ApiKey
