@@ -16,6 +16,7 @@ exports.handler = async (event, context) => {
   const now = dt.toISOString();
   const awsAccountId = context.invokedFunctionArn.split(':')[4]
   let channel;
+  let thumbnail_url = "";
 
   const response = {
     statusCode: 200,
@@ -75,22 +76,35 @@ exports.handler = async (event, context) => {
     }
   });
 
-  // 방송 종료 DynamoDB 업데이트 및 SQS에 방송 종료 이벤트 발송
+  async function getThumbnailUrl(ms) {
+    try {
+      await sleep(ms);
+      const bucketParams = {
+        Bucket : ivsBucketName,
+        Prefix : 'ivs/v1/' + awsAccountId + '/'+ channel.Item.channel_arn.split("/")[1] + '/'
+      };
+
+      const s3List= await s3.listObjectsV2(bucketParams).promise();
+      const items = s3List.Contents.filter(item => item.Key.endsWith('jpg'));
+      thumbnail_url = "https://d3cgmkcvd3sd1x.cloudfront.net/" + items[0].Key;
+      console.log("https://d3cgmkcvd3sd1x.cloudfront.net/" + items[0].Key);
+    } catch (err) {
+      console.error('ERROR: IVS stopChannel', err);
+      response.statusCode = 500;
+      response.body = "썸네일 경로가 생성 되지 않았습니다. (10초 이상 방송 필요). ";
+    }
+  }
+
   try {
-    const bucketParams = {
-      Bucket : ivsBucketName,
-      Prefix : 'ivs/v1/' + awsAccountId + '/'+ channel.Item.channel_arn.split("/")[1] + '/'
-    };
+    console.log("썸네일 경로 생성");
+    // 대기 후 수행
+    await getThumbnailUrl(2000);
 
-    const s3List= await s3.listObjectsV2(bucketParams).promise();
-    const items = s3List.Contents.filter(item => item.Key.endsWith('jpg'));
-    const thumbnail_url = "https://d3cgmkcvd3sd1x.cloudfront.net/" + items[0].Key;
-    console.log("https://d3cgmkcvd3sd1x.cloudfront.net/" + items[0].Key);
-
+    // DB 업데이트
+    console.log("DB 업데이트");
     let updateParams = {
       ExpressionAttributeValues: {
         ":end_time" : now,
-        ":is_live" : false,
         ":thumbnail_url" : thumbnail_url,
         ":channel_type" : "ENCODING"
       },
@@ -98,11 +112,12 @@ exports.handler = async (event, context) => {
         "channel_name": channel.Item.channel_name
       },
       ReturnValues: "NONE",
-      TableName: tableName,
-      UpdateExpression: "SET end_time = :end_time, is_live = :is_live, thumbnail_url = :thumbnail_url, channel_type = :channel_type"
+      TableName: "channel",
+      UpdateExpression: "SET end_time = :end_time, thumbnail_url = :thumbnail_url, channel_type = :channel_type"
     };
     await dynamodb.update(updateParams).promise();
 
+    console.log("메시지 발행");
     const message = {
       channel_id: channel.Item.channel_arn.split("/")[1],
       channel_name: channel.Item.channel_name
@@ -115,7 +130,7 @@ exports.handler = async (event, context) => {
 
     const msg = await sqs.sendMessage(sendParams).promise();
     console.log("Success", msg);
-
+    response.body += "라이브 스트리밍이 정상 종료 되었습니다.";
   } catch (err) {
     console.error('ERROR: IVS stopChannel', err);
     response.statusCode = 500;
@@ -126,6 +141,10 @@ exports.handler = async (event, context) => {
 
   return response;
 };
+
+let sleep = function(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 let isEmpty = function(value) {
   return value == "" || value == null || value == undefined || (value != null && typeof value == "object" && !Object.keys(value).length);
